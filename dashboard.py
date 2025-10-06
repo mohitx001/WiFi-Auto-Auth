@@ -71,6 +71,8 @@ DASHBOARD_CONFIG = load_dashboard_config()
 class LoginAttempt(BaseModel):
     id: int
     timestamp: str
+    network_name: Optional[str] = None
+    network_ssid: Optional[str] = None
     username: str
     a: str
     response_status: str
@@ -87,6 +89,7 @@ class FilterParams(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     status_filter: Optional[str] = None
+    network_filter: Optional[str] = None
     limit: int = 50
 
 # --- FASTAPI APP SETUP ---
@@ -120,15 +123,26 @@ def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
 # --- DATABASE FUNCTIONS ---
 def get_db_connection():
     """Get database connection"""
+    conn = sqlite3.connect(DB_NAME)
+    
     if not os.path.exists(DB_NAME):
-        logger.warning(f"Database {DB_NAME} not found. Creating empty database.")
-        # Create an empty database with the required table structure
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        logger.warning(f"Database {DB_NAME} not found. Creating new database.")
+    
+    # Ensure table exists with multi-network support
+    cursor = conn.cursor()
+    
+    # Check if table exists and get its schema
+    cursor.execute("PRAGMA table_info(login_attempts)")
+    columns = [row[1] for row in cursor.fetchall()]
+    
+    if not columns:
+        # Create new table with network support
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS login_attempts (
+            CREATE TABLE login_attempts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT,
+                network_name TEXT,
+                network_ssid TEXT,
                 username TEXT,
                 password TEXT,
                 a TEXT,
@@ -136,21 +150,43 @@ def get_db_connection():
                 response_message TEXT
             )
         """)
-        conn.commit()
-        return conn
+        logger.info("Created new login_attempts table with network support")
+    else:
+        # Check if we need to add network columns to existing table
+        if 'network_name' not in columns:
+            cursor.execute("ALTER TABLE login_attempts ADD COLUMN network_name TEXT")
+            logger.info("Added network_name column to existing table")
+        
+        if 'network_ssid' not in columns:
+            cursor.execute("ALTER TABLE login_attempts ADD COLUMN network_ssid TEXT")
+            logger.info("Added network_ssid column to existing table")
     
-    return sqlite3.connect(DB_NAME)
+    conn.commit()
+    return conn
 
-def get_login_attempts(filters: FilterParams) -> List[Dict]:
+def get_login_attempts(filters: FilterParams, network_filter: Optional[str] = None) -> List[Dict]:
     """Get login attempts with filters"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    query = """
-        SELECT id, timestamp, username, a, response_status, response_message 
-        FROM login_attempts 
-        WHERE 1=1
-    """
+    # Check if table has network columns
+    cursor.execute("PRAGMA table_info(login_attempts)")
+    columns = [row[1] for row in cursor.fetchall()]
+    has_network_columns = 'network_name' in columns and 'network_ssid' in columns
+    
+    if has_network_columns:
+        query = """
+            SELECT id, timestamp, network_name, network_ssid, username, a, response_status, response_message 
+            FROM login_attempts 
+            WHERE 1=1
+        """
+    else:
+        query = """
+            SELECT id, timestamp, username, a, response_status, response_message 
+            FROM login_attempts 
+            WHERE 1=1
+        """
+    
     params = []
     
     if filters.start_date:
@@ -167,6 +203,10 @@ def get_login_attempts(filters: FilterParams) -> List[Dict]:
         elif filters.status_filter == "failed":
             query += " AND response_status != '200'"
     
+    if network_filter and has_network_columns:
+        query += " AND network_name = ?"
+        params.append(network_filter)
+    
     query += " ORDER BY timestamp DESC LIMIT ?"
     params.append(filters.limit)
     
@@ -174,17 +214,34 @@ def get_login_attempts(filters: FilterParams) -> List[Dict]:
     rows = cursor.fetchall()
     conn.close()
     
-    return [
-        {
-            "id": row[0],
-            "timestamp": row[1],
-            "username": row[2],
-            "a": row[3],
-            "response_status": row[4],
-            "response_message": row[5]
-        }
-        for row in rows
-    ]
+    if has_network_columns:
+        return [
+            {
+                "id": row[0],
+                "timestamp": row[1],
+                "network_name": row[2],
+                "network_ssid": row[3],
+                "username": row[4],
+                "a": row[5],
+                "response_status": row[6],
+                "response_message": row[7]
+            }
+            for row in rows
+        ]
+    else:
+        return [
+            {
+                "id": row[0],
+                "timestamp": row[1],
+                "network_name": "Legacy",
+                "network_ssid": "Unknown",
+                "username": row[2],
+                "a": row[3],
+                "response_status": row[4],
+                "response_message": row[5]
+            }
+            for row in rows
+        ]
 
 def get_dashboard_stats() -> DashboardStats:
     """Get dashboard statistics"""
@@ -219,6 +276,54 @@ def get_dashboard_stats() -> DashboardStats:
         success_rate=round(success_rate, 2),
         last_attempt=last_attempt
     )
+
+def get_network_stats() -> List[Dict]:
+    """Get statistics per network profile"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if table has network columns
+    cursor.execute("PRAGMA table_info(login_attempts)")
+    columns = [row[1] for row in cursor.fetchall()]
+    has_network_columns = 'network_name' in columns and 'network_ssid' in columns
+    
+    if not has_network_columns:
+        return []
+    
+    query = """
+        SELECT 
+            network_name,
+            network_ssid,
+            COUNT(*) as total_attempts,
+            SUM(CASE WHEN response_status = '200' THEN 1 ELSE 0 END) as successful_attempts,
+            MAX(timestamp) as last_attempt
+        FROM login_attempts 
+        WHERE network_name IS NOT NULL
+        GROUP BY network_name, network_ssid
+        ORDER BY total_attempts DESC
+    """
+    
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    stats = []
+    for row in rows:
+        network_name, network_ssid, total, successful, last_attempt = row
+        failed = total - successful
+        success_rate = (successful / total * 100) if total > 0 else 0
+        
+        stats.append({
+            "network_name": network_name,
+            "network_ssid": network_ssid,
+            "total_attempts": total,
+            "successful_attempts": successful,
+            "failed_attempts": failed,
+            "success_rate": round(success_rate, 2),
+            "last_attempt": last_attempt
+        })
+    
+    return stats
 
 def get_hourly_stats(days: int = 7) -> List[Dict]:
     """Get hourly login attempt statistics for the last N days"""
@@ -264,11 +369,13 @@ async def dashboard(request: Request, username: str = Depends(authenticate)):
     
     # Get statistics
     stats = get_dashboard_stats()
+    network_stats = get_network_stats()
     
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "recent_attempts": recent_attempts,
         "stats": stats,
+        "network_stats": network_stats,
         "username": username
     })
 
@@ -277,6 +384,7 @@ async def get_attempts_api(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     status_filter: Optional[str] = None,
+    network_filter: Optional[str] = None,
     limit: int = 50,
     username: str = Depends(authenticate)
 ):
@@ -285,10 +393,11 @@ async def get_attempts_api(
         start_date=start_date,
         end_date=end_date,
         status_filter=status_filter,
+        network_filter=network_filter,
         limit=limit
     )
     
-    attempts = get_login_attempts(filters)
+    attempts = get_login_attempts(filters, network_filter)
     logger.info(f"API call: Retrieved {len(attempts)} login attempts")
     
     return {"attempts": attempts}
@@ -298,6 +407,16 @@ async def get_stats_api(username: str = Depends(authenticate)):
     """API endpoint to get dashboard statistics"""
     stats = get_dashboard_stats()
     logger.info("API call: Retrieved dashboard statistics")
+    
+    return {"stats": stats}
+
+@app.get("/api/network-stats")
+async def get_network_stats_api(username: str = Depends(authenticate)):
+    """API endpoint to get network-specific statistics"""
+    network_stats = get_network_stats()
+    logger.info("API call: Retrieved network statistics")
+    
+    return {"network_stats": network_stats}
     return stats
 
 @app.get("/api/hourly-stats")

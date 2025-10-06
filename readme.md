@@ -30,6 +30,38 @@ python wifi_auto_login.py --dashboard
 
 **📖 Full documentation: [DASHBOARD.md](DASHBOARD.md)**
 
+## **🌐 NEW: Multi-Network Support**
+
+**Automatically handle multiple WiFi networks with intelligent auto-detection!**
+
+### **Multi-Network Features**
+- 🏠 **Multiple Profiles**: Configure home, work, school networks
+- 🔍 **Auto-Detection**: Automatically detects current SSID
+- 📱 **Smart Selection**: Chooses appropriate credentials
+- 📊 **Network Analytics**: Per-network statistics in dashboard
+- 🔄 **Seamless Switching**: No manual intervention needed
+- 📋 **Easy Management**: List, detect, and filter by network
+
+### **Quick Multi-Network Setup**
+```bash
+# Copy and configure multi-network template
+cp config.example.json config.json
+
+# List configured networks
+python wifi_auto_login.py --list-networks
+
+# Auto-detect current network
+python wifi_auto_login.py --detect-network
+
+# Login with auto-detection
+python wifi_auto_login.py --login
+
+# Use specific network profile
+python wifi_auto_login.py --login --network work
+```
+
+**📖 Complete guide: [MULTI_NETWORK.md](MULTI_NETWORK.md)**
+
 ## **Logging Options**
 
 This application features a comprehensive professional logging system that provides detailed insights into login attempts, debugging information, and system status. The logging system supports multiple output destinations, configurable log levels, and automatic log rotation.
